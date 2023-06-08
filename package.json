@@ -10,7 +10,7 @@
     "opencv-wasm": "4.3.0-3"
   },
   "scripts": {
-    "start": "node main.js"
+    "start": "node index.js"
   },
   "repository": {
     "type": "git",

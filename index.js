@@ -1,143 +1,121 @@
-const puppeteer = require('puppeteer')
-const fs = require('fs').promises
-const Jimp = require('jimp')
-const pixelmatch = require('pixelmatch')
-const { cv } = require('opencv-wasm')
+const puppeteer = require("puppeteer");
+const searchingLines = require("./searchingLine");
 
-async function findPuzzlePosition (page) {
-    let images = await page.$$eval('.geetest_canvas_img canvas', canvases => canvases.map(canvas => canvas.toDataURL().replace(/^data:image\/png;base64,/, '')))
+async function getGolanMatrix(page) {
+  await page.waitForSelector('[aria-label="Click to verify"]');
+  await page.waitFor(1000);
+  await page.click('[aria-label="Click to verify"]');
+  await page.waitFor(1000);
 
-    await fs.writeFile(`./puzzle.png`, images[1], 'base64')
+  const matrix_to_return = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+  ];
 
-    let srcPuzzleImage = await Jimp.read('./puzzle.png')
-    let srcPuzzle = cv.matFromImageData(srcPuzzleImage.bitmap)
-    let dstPuzzle = new cv.Mat()
+  const indexList = [
+    1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15, 17, 18, 19, 21, 22, 23, 25, 26, 27,
+    29, 30, 31, 33,
+  ];
+  const imageList = [];
 
-    cv.cvtColor(srcPuzzle, srcPuzzle, cv.COLOR_BGR2GRAY)
-    cv.threshold(srcPuzzle, dstPuzzle, 127, 255, cv.THRESH_BINARY)
+  for (let rowInd = 0; rowInd < 5; rowInd++) {
+    for (let colInd = 0; colInd < 5; colInd++) {
+      let item = await page.waitForSelector(
+        ".geetest_item-" + rowInd + "-" + colInd
+      );
+      const backgroundImageUrl = await item.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return style.getPropertyValue("background-image");
+      });
+      if (backgroundImageUrl != "none") {
+        if (imageList.find((x) => x === backgroundImageUrl)) {
+          const ind = imageList.findIndex((x) => x === backgroundImageUrl);
+          matrix_to_return[rowInd][colInd] = indexList[ind];
+        } else {
+          imageList.push(backgroundImageUrl);
+          ind = imageList.length - 1;
+          matrix_to_return[rowInd][colInd] = indexList[ind];
+        }
+      }
+    }
+  }
 
-    let kernel = cv.Mat.ones(5, 5, cv.CV_8UC1)
-    let anchor = new cv.Point(-1, -1)
-    cv.dilate(dstPuzzle, dstPuzzle, kernel, anchor, 1)
-    cv.erode(dstPuzzle, dstPuzzle, kernel, anchor, 1)
-
-    let contours = new cv.MatVector()
-    let hierarchy = new cv.Mat()
-    cv.findContours(dstPuzzle, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-
-    let contour = contours.get(0)
-    let moment = cv.moments(contour)
-
-    return [Math.floor(moment.m10 / moment.m00), Math.floor(moment.m01 / moment.m00)]
+  await page.waitFor(2000);
+  return matrix_to_return;
 }
 
-async function findDiffPosition (page) {
-    await page.waitFor(100)
+function exchangePoints(matrix) {
+  let blankPos = [0, 0];
+  let exchangePos = [0, 1];
+  searchingLines.every((line) => {
+    let occurrences = {};
+    line.forEach((position) => {
+      const value = matrix[position[0]][position[1]];
+      if (value === 0) {
+        return;
+      }
+      if (occurrences[value]) {
+        occurrences[value]++;
+      } else {
+        occurrences[value] = 1;
+      }
+    });
 
-    let srcImage = await Jimp.read('./diff.png')
-    let src = cv.matFromImageData(srcImage.bitmap)
+    for (let occur in occurrences) {
+      if (occurrences[occur] == 4) {
+        const posInd = line.findIndex((position) => {
+          return matrix[position[0]][position[1]] != occur;
+        });
 
-    let dst = new cv.Mat()
-    let kernel = cv.Mat.ones(5, 5, cv.CV_8UC1)
-    let anchor = new cv.Point(-1, -1)
+        blankPos = line[posInd];
 
-    cv.threshold(src, dst, 127, 255, cv.THRESH_BINARY)
-    cv.erode(dst, dst, kernel, anchor, 1)
-    cv.dilate(dst, dst, kernel, anchor, 1)
-    cv.erode(dst, dst, kernel, anchor, 1)
-    cv.dilate(dst, dst, kernel, anchor, 1)
+        matrix.some((row, indR) => {
+          let find = false;
+          row.some((item, indC) => {
+            if (
+              item == occur &&
+              !line.find((pos) => pos[0] === indR && pos[1] === indC)
+            ) {
+              find = true;
+              exchangePos = [indR, indC];
+            }
+            return find;
+          });
+          return find;
+        });
 
-    cv.cvtColor(dst, dst, cv.COLOR_BGR2GRAY)
-    cv.threshold(dst, dst, 150, 255, cv.THRESH_BINARY_INV)
+        return false;
+      }
+    }
 
-    let contours = new cv.MatVector()
-    let hierarchy = new cv.Mat()
-    cv.findContours(dst, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    return true;
+  });
 
-    let contour = contours.get(0)
-    let moment = cv.moments(contour)
-
-    return [Math.floor(moment.m10 / moment.m00), Math.floor(moment.m01 / moment.m00)]
+  return { exchangePos, blankPos };
 }
 
-async function saveSliderCaptchaImages(page) {
-    await page.waitForSelector('.tab-item.tab-item-1')
-    await page.click('.tab-item.tab-item-1')
+async function run() {
+  const browser = await puppeteer.launch({
+    headless: false,
+    defaultViewport: { width: 1366, height: 768 },
+  });
+  const page = await browser.newPage();
 
-    await page.waitForSelector('[aria-label="Click to verify"]')
-    await page.waitFor(1000)
+  await page.goto("http://gt4.geetest.com/demov4/winlinze-popup-en.html");
 
-    await page.click('[aria-label="Click to verify"]')
+  await page.waitFor(1000);
 
-    await page.waitForSelector('.geetest_canvas_img canvas', { visible: true })
-    await page.waitFor(1000)
-    let images = await page.$$eval('.geetest_canvas_img canvas', canvases => {
-        return canvases.map(canvas => canvas.toDataURL().replace(/^data:image\/png;base64,/, ''))
-    })
+  const golang_matrix = await getGolanMatrix(page);
 
-    await fs.writeFile(`./captcha.png`, images[0], 'base64')
-    await fs.writeFile(`./original.png`, images[2], 'base64')
+  const { exchangePos, blankPos } = exchangePoints(golang_matrix);
+  console.log(exchangePos, blankPos);
+
+  await page.click(".geetest_item-" + exchangePos[0] + "-" + exchangePos[1]);
+  await page.waitFor(1000);
+  await page.click(".geetest_item-" + blankPos[0] + "-" + blankPos[1]);
 }
 
-async function saveDiffImage() {
-    const originalImage = await Jimp.read('./original.png')
-    const captchaImage = await Jimp.read('./captcha.png')
-
-    const { width, height } = originalImage.bitmap
-    const diffImage = new Jimp(width, height)
-
-    const diffOptions = { includeAA: true, threshold: 0.2 }
-
-    pixelmatch(originalImage.bitmap.data, captchaImage.bitmap.data, diffImage.bitmap.data, width, height, diffOptions)
-    diffImage.write('./diff.png')
-}
-
-async function run () {
-    const browser = await puppeteer.launch({
-        headless: false,
-        defaultViewport: { width: 1366, height: 768 }
-    })
-    const page = await browser.newPage()
-
-    await page.goto('https://www.geetest.com/en/demo', { waitUntil: 'networkidle2' })
-
-    await page.waitFor(1000)
-
-    await saveSliderCaptchaImages(page)
-    await saveDiffImage()
-
-    let [cx, cy] = await findDiffPosition(page)
-
-    const sliderHandle = await page.$('.geetest_slider_button')
-    const handle = await sliderHandle.boundingBox()
-
-    let xPosition = handle.x + handle.width / 2
-    let yPosition = handle.y + handle.height / 2
-    await page.mouse.move(xPosition, yPosition)
-    await page.mouse.down()
-
-    xPosition = handle.x + cx - handle.width / 2
-    yPosition = handle.y + handle.height / 3
-    await page.mouse.move(xPosition, yPosition, { steps: 25 })
-
-    await page.waitFor(100)
-
-    let [cxPuzzle, cyPuzzle] = await findPuzzlePosition(page)
-
-    xPosition = xPosition + cx - cxPuzzle
-    yPosition = handle.y + handle.height / 2
-    await page.mouse.move(xPosition, yPosition, { steps: 5 })
-    await page.mouse.up()
-
-    await page.waitFor(3000)
-    // success!
-
-    await fs.unlink('./original.png')
-    await fs.unlink('./captcha.png')
-    await fs.unlink('./diff.png')
-    await fs.unlink('./puzzle.png')
-
-    await browser.close()
-}
-
-run()
+run();
